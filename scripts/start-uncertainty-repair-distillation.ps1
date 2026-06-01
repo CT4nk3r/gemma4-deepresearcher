@@ -32,6 +32,29 @@ function Write-Log {
     Write-Host $Line
 }
 
+function Invoke-NativeLogged {
+    param(
+        [string]$FilePath,
+        [string[]]$Arguments,
+        [switch]$AllowFailure
+    )
+
+    Write-Log "$FilePath $($Arguments -join ' ')"
+    $PreviousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & $FilePath @Arguments *>> $LogFile
+        $ExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $PreviousErrorActionPreference
+    }
+
+    if ($ExitCode -ne 0 -and -not $AllowFailure) {
+        throw "$FilePath exited with code $ExitCode"
+    }
+    return $ExitCode
+}
+
 function Get-TrainLoraProcess {
     Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" |
         Where-Object { $_.CommandLine -like '*training*train_lora.py*' -or $_.CommandLine -like '*train_lora.py*' } |
@@ -75,46 +98,49 @@ if ($PauseRelayAfterTraining) {
 }
 
 Write-Log "Starting LM Studio server"
-& lms server start *>> $LogFile
+Invoke-NativeLogged "lms" @("server", "start") | Out-Null
 
 Write-Log "Loading teacher model $TeacherModel"
-& lms load $TeacherModel --identifier $TeacherModel --gpu max --context-length 4096 -y *>> $LogFile
+Invoke-NativeLogged "lms" @("load", $TeacherModel, "--identifier", $TeacherModel, "--gpu", "max", "--context-length", "4096", "-y") | Out-Null
 
 try {
     Write-Log "Distilling uncertainty repair examples"
-    & $PythonPath "training\distill_with_lmstudio.py" `
-        --input $SeedInput `
-        --output $RawOutput `
-        --base-url $BaseUrl `
-        --model $TeacherModel `
-        --max-examples $Target `
-        --temperature $Temperature `
-        --max-tokens $MaxTokens `
-        --timeout 600 `
-        --sleep 0.1 `
-        --retries 3 `
-        --retry-sleep 10 `
-        --resume `
-        --on-error skip *>> $LogFile
-    if ($LASTEXITCODE -ne 0) {
-        throw "distill_with_lmstudio.py exited with code $LASTEXITCODE"
-    }
+    Invoke-NativeLogged $PythonPath @(
+        "training\distill_with_lmstudio.py",
+        "--input", $SeedInput,
+        "--output", $RawOutput,
+        "--base-url", $BaseUrl,
+        "--model", $TeacherModel,
+        "--max-examples", "$Target",
+        "--temperature", "$Temperature",
+        "--max-tokens", "$MaxTokens",
+        "--timeout", "600",
+        "--sleep", "0.1",
+        "--retries", "3",
+        "--retry-sleep", "10",
+        "--resume",
+        "--on-error", "skip"
+    ) | Out-Null
 
     Write-Log "Cleaning uncertainty repair examples"
-    & $PythonPath "training\clean_sft_dataset.py" --input $RawOutput --output $CleanOutput *>> $LogFile
-    if ($LASTEXITCODE -ne 0) {
-        throw "clean_sft_dataset.py exited with code $LASTEXITCODE"
-    }
+    Invoke-NativeLogged $PythonPath @("training\clean_sft_dataset.py", "--input", $RawOutput, "--output", $CleanOutput) | Out-Null
 
     Write-Log "Validating clean uncertainty repair examples"
     Remove-Item -Force $StatsOutput -ErrorAction SilentlyContinue
-    & $PythonPath "training\validate_sft_dataset.py" $CleanOutput --json *>> $StatsOutput
-    if ($LASTEXITCODE -ne 0) {
-        throw "validate_sft_dataset.py exited with code $LASTEXITCODE"
+    $PreviousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & $PythonPath "training\validate_sft_dataset.py" $CleanOutput --json *>> $StatsOutput
+        $ValidateExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $PreviousErrorActionPreference
+    }
+    if ($ValidateExitCode -ne 0) {
+        throw "validate_sft_dataset.py exited with code $ValidateExitCode"
     }
 } finally {
     Write-Log "Unloading teacher model $TeacherModel"
-    & lms unload $TeacherModel *>> $LogFile
+    Invoke-NativeLogged "lms" @("unload", $TeacherModel) -AllowFailure | Out-Null
 }
 
 Write-Log "Uncertainty repair distillation complete: $CleanOutput"
