@@ -11,6 +11,7 @@ dist/
 build/
 data/*
 !data/eval_set.jsonl
+!data/uncertainty_repair_seed_sft.jsonl
 adapters/
 models/
 runs/
