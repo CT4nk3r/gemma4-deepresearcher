@@ -51,6 +51,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--train-max-length", type=int, default=512)
     parser.add_argument("--train-batch-size", type=int, default=1)
     parser.add_argument("--train-grad-accum", type=int, default=2)
+    parser.add_argument("--train-retries", type=int, default=2)
+    parser.add_argument("--train-retry-sleep", type=int, default=90)
     parser.add_argument("--learning-rate", type=float, default=5e-5)
     parser.add_argument("--lora-r", type=int, default=16)
     parser.add_argument("--lora-alpha", type=int, default=32)
@@ -67,6 +69,10 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("--teacher-chunk-size must be at least 1")
     if args.train_steps < 1:
         raise SystemExit("--train-steps must be at least 1")
+    if args.train_retries < 0:
+        raise SystemExit("--train-retries must not be negative")
+    if args.train_retry_sleep < 0:
+        raise SystemExit("--train-retry-sleep must not be negative")
 
     state_paths(args)
     deadline = datetime.now(timezone.utc) + timedelta(hours=args.hours)
@@ -183,12 +189,41 @@ def teach(args: argparse.Namespace, deadline: datetime, cycle: int, next_target:
 def train(args: argparse.Namespace, deadline: datetime, cycle: int) -> None:
     unload_teacher(args)
     clean_examples = clean_count(args.clean_output)
-    run_name = (
+    base_run_name = (
         f"gemma4-e4b-deepresearch-lora-relay-"
         f"{cycle:03d}-{clean_examples}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
     )
-    output_dir = str(Path(args.runs_dir) / run_name)
-    write_status(args, phase="training", cycle=cycle, adapter_output=output_dir, deadline=deadline)
+    attempts = args.train_retries + 1
+    last_error: RuntimeError | None = None
+    for attempt in range(1, attempts + 1):
+        output_dir = str(Path(args.runs_dir) / run_attempt_name(base_run_name, attempt, attempts))
+        write_status(
+            args,
+            phase="training" if attempt == 1 else "training_retry",
+            cycle=cycle,
+            adapter_output=output_dir,
+            deadline=deadline,
+            error=str(last_error) if last_error else None,
+        )
+        try:
+            train_once(args, deadline, output_dir)
+        except RuntimeError as exc:
+            last_error = exc
+            log(args, f"Training attempt {attempt}/{attempts} failed: {exc}")
+            if attempt >= attempts or paused(args) or (deadline and datetime.now(timezone.utc) >= deadline):
+                raise
+            unload_teacher(args)
+            sleep_with_pause(args, args.train_retry_sleep)
+            continue
+
+        latest = Path(args.latest_adapter_dir)
+        shutil.rmtree(latest, ignore_errors=True)
+        shutil.copytree(output_dir, latest)
+        write_status(args, phase="trained", cycle=cycle, adapter_output=output_dir, deadline=deadline)
+        return
+
+
+def train_once(args: argparse.Namespace, deadline: datetime, output_dir: str) -> None:
     env = dict(os.environ)
     env.setdefault("TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL", "1")
     run_command(
@@ -230,10 +265,12 @@ def train(args: argparse.Namespace, deadline: datetime, cycle: int) -> None:
         deadline,
         env=env,
     )
-    latest = Path(args.latest_adapter_dir)
-    shutil.rmtree(latest, ignore_errors=True)
-    shutil.copytree(output_dir, latest)
-    write_status(args, phase="trained", cycle=cycle, adapter_output=output_dir, deadline=deadline)
+
+
+def run_attempt_name(base_run_name: str, attempt: int, attempts: int) -> str:
+    if attempts <= 1:
+        return base_run_name
+    return f"{base_run_name}-try{attempt:02d}"
 
 
 def unload_teacher(args: argparse.Namespace) -> None:
