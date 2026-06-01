@@ -3,6 +3,7 @@ param(
     [string]$RawOutput = "data\uncertainty_repair_distilled_sft.jsonl",
     [string]$CleanOutput = "data\uncertainty_repair_clean_sft.jsonl",
     [string]$StatsOutput = "data\uncertainty_repair_clean_sft.stats.json",
+    [string]$PythonExe = ".venv-rocm\Scripts\python.exe",
     [string]$TeacherModel = "alibaba-nlp_tongyi-deepresearch-30b-a3b",
     [string]$BaseUrl = "http://localhost:1234/v1",
     [int]$Target = 60,
@@ -41,6 +42,14 @@ if (-not (Test-Path $SeedInput -PathType Leaf)) {
     throw "Seed input not found: $SeedInput"
 }
 
+$PythonPath = $PythonExe
+if (-not [System.IO.Path]::IsPathRooted($PythonPath)) {
+    $PythonPath = Join-Path $Root $PythonPath
+}
+if (-not (Test-Path $PythonPath -PathType Leaf)) {
+    throw "Python executable not found: $PythonPath"
+}
+
 if ($WaitForTraining) {
     Write-Log "Waiting for active train_lora.py process to finish"
     while ($true) {
@@ -73,7 +82,7 @@ Write-Log "Loading teacher model $TeacherModel"
 
 try {
     Write-Log "Distilling uncertainty repair examples"
-    & python "training\distill_with_lmstudio.py" `
+    & $PythonPath "training\distill_with_lmstudio.py" `
         --input $SeedInput `
         --output $RawOutput `
         --base-url $BaseUrl `
@@ -92,14 +101,14 @@ try {
     }
 
     Write-Log "Cleaning uncertainty repair examples"
-    & python "training\clean_sft_dataset.py" --input $RawOutput --output $CleanOutput *>> $LogFile
+    & $PythonPath "training\clean_sft_dataset.py" --input $RawOutput --output $CleanOutput *>> $LogFile
     if ($LASTEXITCODE -ne 0) {
         throw "clean_sft_dataset.py exited with code $LASTEXITCODE"
     }
 
     Write-Log "Validating clean uncertainty repair examples"
     Remove-Item -Force $StatsOutput -ErrorAction SilentlyContinue
-    & python "training\validate_sft_dataset.py" $CleanOutput --json *>> $StatsOutput
+    & $PythonPath "training\validate_sft_dataset.py" $CleanOutput --json *>> $StatsOutput
     if ($LASTEXITCODE -ne 0) {
         throw "validate_sft_dataset.py exited with code $LASTEXITCODE"
     }
