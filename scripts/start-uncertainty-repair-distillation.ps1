@@ -1,5 +1,5 @@
 param(
-    [string]$Input = "data\uncertainty_repair_seed_sft.jsonl",
+    [string]$SeedInput = "data\uncertainty_repair_seed_sft.jsonl",
     [string]$RawOutput = "data\uncertainty_repair_distilled_sft.jsonl",
     [string]$CleanOutput = "data\uncertainty_repair_clean_sft.jsonl",
     [string]$StatsOutput = "data\uncertainty_repair_clean_sft.stats.json",
@@ -37,8 +37,8 @@ function Get-TrainLoraProcess {
         Select-Object -First 1
 }
 
-if (-not (Test-Path $Input -PathType Leaf)) {
-    throw "Seed input not found: $Input"
+if (-not (Test-Path $SeedInput -PathType Leaf)) {
+    throw "Seed input not found: $SeedInput"
 }
 
 if ($WaitForTraining) {
@@ -74,7 +74,7 @@ Write-Log "Loading teacher model $TeacherModel"
 try {
     Write-Log "Distilling uncertainty repair examples"
     & python "training\distill_with_lmstudio.py" `
-        --input $Input `
+        --input $SeedInput `
         --output $RawOutput `
         --base-url $BaseUrl `
         --model $TeacherModel `
