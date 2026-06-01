@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "description": "Public bootstrap datasets for turning Gemma E4B into a researcher-specialist model. Review dataset cards and licenses before redistribution or commercial use.",
+  "datasets": [
+    {
+      "id": "webgpt-comparisons",
+      "hf_id": "openai/webgpt_comparisons",
+      "url": "https://openaipublic.blob.core.windows.net/webgpt-answer-viewer/comparisons.jsonl",
+      "format": "jsonl",
+      "splits": ["train", "validation"],
+      "converter": "webgpt_comparisons",
+      "default_max_examples": 5000,
+      "purpose": "Citation discipline and preference-selected web answers.",
+      "license_note": "Review the Hugging Face dataset card before use."
+    },
+    {
+      "id": "hotpotqa-distractor",
+      "hf_id": "hotpotqa/hotpot_qa",
+      "config": "distractor",
+      "splits": ["train", "validation"],
+      "converter": "evidence_qa",
+      "trust_remote_code": true,
+      "default_max_examples": 10000,
+      "purpose": "Multi-hop evidence-backed QA with supporting passages.",
+      "license_note": "Review the original HotpotQA license and dataset card before use."
+    },
+    {
+      "id": "musique",
+      "hf_id": "dgslibisey/MuSiQue",
+      "splits": ["train", "validation"],
+      "converter": "evidence_qa",
+      "default_max_examples": 5000,
+      "purpose": "Compositional multi-hop evidence QA.",
+      "license_note": "Review the dataset card before use."
+    },
+    {
+      "id": "agent-data",
+      "hf_id": "arcee-ai/agent-data",
+      "splits": ["train"],
+      "converter": "conversation",
+      "default_max_examples": 5000,
+      "purpose": "Generic agent/tool-use conversations for structured behavior bootstrapping.",
+      "license_note": "Review the dataset card before use."
+    }
+  ]
+}

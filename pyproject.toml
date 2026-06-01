@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gemma-deepresearch-e4b"
+version = "0.1.0"
+description = "Local DeepResearch-style agent runtime for Gemma E4B models"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Gemma DeepResearch contributors" }]
+keywords = ["gemma", "deepresearch", "lm-studio", "ollama", "research-agent"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = []
+
+[project.optional-dependencies]
+data = [
+  "datasets>=2.18,<4",
+]
+training = [
+  "accelerate>=0.33",
+  "bitsandbytes>=0.43; platform_system != 'Windows'",
+  "datasets>=2.18,<4",
+  "huggingface_hub>=0.24",
+  "peft>=0.12",
+  "torch>=2.3",
+  "transformers>=4.44",
+]
+
+[project.scripts]
+gemma-research = "gemma_research.cli:main"
+gemma-research-eval = "gemma_research.evaluation:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+gemma_research = ["py.typed"]

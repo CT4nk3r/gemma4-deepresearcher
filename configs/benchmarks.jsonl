@@ -1,0 +1,5 @@
+{"id":"technology-research-001","mode":"web","question":"Compare local LLM inference options for a small research agent.","metrics":["citation_accuracy","hallucination_rate","task_completion_rate"]}
+{"id":"repository-analysis-001","mode":"repo","question":"Analyze the architecture and risks in this repository.","metrics":["tool_call_success_rate","task_completion_rate"]}
+{"id":"literature-review-001","mode":"web","question":"Summarize recent approaches to agentic web research with citations.","metrics":["citation_accuracy","hallucination_rate"]}
+{"id":"bug-investigation-001","mode":"repo","question":"Find likely sources of fragile error handling in this codebase.","metrics":["task_completion_rate","tool_call_success_rate"]}
+{"id":"architecture-review-001","mode":"repo","question":"Identify the primary modules, dependencies, and extension points.","metrics":["task_completion_rate","citation_accuracy"]}

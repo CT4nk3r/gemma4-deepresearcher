@@ -1,0 +1,12 @@
+[model]
+provider = "offline"
+model = "deterministic"
+
+[search]
+provider = "none"
+max_results = 0
+
+[agent]
+max_iterations = 1
+min_sources = 1
+trace_dir = ".gemma-research/traces"
