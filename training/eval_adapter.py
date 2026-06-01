@@ -5,6 +5,9 @@ import gc
 import json
 import os
 import re
+import subprocess
+import sys
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -99,6 +102,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--trust-remote-code", action="store_true")
     parser.add_argument("--limit", type=int, help="Evaluate only the first N examples")
     parser.add_argument("--dry-run", action="store_true", help="Exercise scoring and output without loading models")
+    parser.add_argument(
+        "--in-process",
+        action="store_true",
+        help="Load base and adapter in one Python process instead of isolated subprocesses.",
+    )
+    parser.add_argument("--generate-only", choices=["base", "adapter"], help=argparse.SUPPRESS)
+    parser.add_argument("--responses-output", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
 
     if args.max_new_tokens < 1:
@@ -113,6 +123,16 @@ def main(argv: list[str] | None = None) -> int:
         examples = examples[: args.limit]
     if not examples:
         raise SystemExit(f"No eval examples found in {args.eval_set}")
+
+    if args.generate_only:
+        if not args.responses_output:
+            raise SystemExit("--responses-output is required with --generate-only")
+        responses = generate_variant_responses(args.generate_only, args, examples)
+        Path(args.responses_output).write_text(
+            json.dumps({"variant": args.generate_only, "responses": responses}, ensure_ascii=True),
+            encoding="utf-8",
+        )
+        return 0
 
     payload = run_evaluation(args, examples)
     json_path, markdown_path = write_results(payload, args.output_dir)
@@ -158,8 +178,12 @@ def run_evaluation(args: argparse.Namespace, examples: list[EvalExample]) -> dic
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     validate_model_inputs(args.base_model, args.adapter, skip_adapter_path=args.dry_run)
 
-    base_responses = generate_variant_responses("base", args, examples)
-    adapter_responses = generate_variant_responses("adapter", args, examples)
+    if args.dry_run or args.in_process:
+        base_responses = generate_variant_responses("base", args, examples)
+        adapter_responses = generate_variant_responses("adapter", args, examples)
+    else:
+        base_responses = generate_variant_responses_in_subprocess("base", args)
+        adapter_responses = generate_variant_responses_in_subprocess("adapter", args)
 
     items: list[dict[str, Any]] = []
     for index, (example, base_response, adapter_response) in enumerate(
@@ -257,6 +281,54 @@ def generate_variant_responses(
         return responses
     finally:
         release_model_bundle(bundle)
+
+
+def generate_variant_responses_in_subprocess(variant: str, args: argparse.Namespace) -> list[str]:
+    with tempfile.TemporaryDirectory(prefix=f"gemma-eval-{variant}-") as tmp:
+        output_path = Path(tmp) / f"{variant}.json"
+        command = [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            "--adapter",
+            args.adapter,
+            "--base-model",
+            args.base_model,
+            "--eval-set",
+            args.eval_set,
+            "--output-dir",
+            args.output_dir,
+            "--max-new-tokens",
+            str(args.max_new_tokens),
+            "--temperature",
+            str(args.temperature),
+            "--top-p",
+            str(args.top_p),
+            "--dtype",
+            args.dtype,
+            "--generate-only",
+            variant,
+            "--responses-output",
+            str(output_path),
+        ]
+        if args.device:
+            command.extend(["--device", args.device])
+        if args.device_map:
+            command.extend(["--device-map", args.device_map])
+        if args.trust_remote_code:
+            command.append("--trust-remote-code")
+        if args.limit is not None:
+            command.extend(["--limit", str(args.limit)])
+
+        env = dict(os.environ)
+        env.setdefault("TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL", "1")
+        result = subprocess.run(command, env=env, check=False)
+        if result.returncode:
+            raise SystemExit(f"{variant} generation failed with exit code {result.returncode}")
+        payload = json.loads(output_path.read_text(encoding="utf-8"))
+        responses = payload.get("responses")
+        if not isinstance(responses, list) or not all(isinstance(item, str) for item in responses):
+            raise SystemExit(f"{variant} generation did not write a valid response payload")
+        return responses
 
 
 def load_model_bundle(
