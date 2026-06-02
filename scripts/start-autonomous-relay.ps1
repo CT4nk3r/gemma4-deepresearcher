@@ -4,7 +4,8 @@ param(
     [int]$TeacherCycleSize = 100,
     [int]$TeacherChunkSize = 25,
     [int]$TrainSteps = 60,
-    [int]$TrainMaxLength = 512
+    [int]$TrainMaxLength = 512,
+    [string]$VenvPython = ".venv-rocm\Scripts\python.exe"
 )
 
 $ErrorActionPreference = "Stop"
@@ -34,9 +35,17 @@ if (Test-Path $PidFile) {
 Remove-Item -Force $PauseFile -ErrorAction SilentlyContinue
 Remove-Item -Force $DistillationPauseFile -ErrorAction SilentlyContinue
 
+$PythonPath = $VenvPython
+if (-not [System.IO.Path]::IsPathRooted($PythonPath)) {
+    $PythonPath = Join-Path $Root $PythonPath
+}
+if (-not (Test-Path $PythonPath -PathType Leaf)) {
+    throw "Python not found: $PythonPath"
+}
+
 $Command = @(
     "Set-Location -LiteralPath '$Root';",
-    "python training\autonomous_relay.py",
+    "'$PythonPath' training\autonomous_relay.py",
     "--hours $Hours",
     "--teacher-target $TeacherTarget",
     "--teacher-cycle-size $TeacherCycleSize",
@@ -52,7 +61,7 @@ $Command = @(
 $Process = Start-Process -FilePath "powershell" `
     -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "$Command *> '$WrapperLogFile'") `
     -WorkingDirectory $Root `
-    -WindowStyle Minimized `
+    -WindowStyle Hidden `
     -PassThru
 
 Set-Content -Path $PidFile -Value $Process.Id
