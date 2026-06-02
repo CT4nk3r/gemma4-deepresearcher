@@ -34,6 +34,7 @@ if (Test-Path $PidFile) {
 
 Remove-Item -Force $PauseFile -ErrorAction SilentlyContinue
 Remove-Item -Force $DistillationPauseFile -ErrorAction SilentlyContinue
+Remove-Item -Force $LogFile,$WrapperLogFile,$StatusFile -ErrorAction SilentlyContinue
 
 $PythonPath = $VenvPython
 if (-not [System.IO.Path]::IsPathRooted($PythonPath)) {
@@ -45,7 +46,7 @@ if (-not (Test-Path $PythonPath -PathType Leaf)) {
 
 $Command = @(
     "Set-Location -LiteralPath '$Root';",
-    "'$PythonPath' training\autonomous_relay.py",
+    "& '$PythonPath' training\autonomous_relay.py",
     "--hours $Hours",
     "--teacher-target $TeacherTarget",
     "--teacher-cycle-size $TeacherCycleSize",
