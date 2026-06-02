@@ -17,6 +17,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--model", required=True, help="Base Gemma model path or Hugging Face id")
     parser.add_argument("--dataset", required=True, help="SFT JSONL produced by prepare_sft_dataset.py")
     parser.add_argument("--output-dir", required=True, help="Adapter output directory")
+    parser.add_argument("--resume-adapter", help="Existing PEFT LoRA adapter directory to continue training")
     parser.add_argument("--max-steps", type=int, default=200)
     parser.add_argument("--learning-rate", type=float, default=2e-4)
     parser.add_argument("--batch-size", type=int, default=1)
@@ -45,7 +46,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         from datasets import load_dataset
-        from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+        from peft import LoraConfig, PeftModel, get_peft_model, prepare_model_for_kbit_training
         from transformers import (
             AutoConfig,
             AutoModelForCausalLM,
@@ -64,6 +65,8 @@ def main(argv: list[str] | None = None) -> int:
     dataset_path = Path(args.dataset)
     if not dataset_path.exists():
         raise SystemExit(f"Dataset not found: {dataset_path}")
+    if args.resume_adapter and not adapter_ready(args.resume_adapter):
+        raise SystemExit(f"Resume adapter is missing required PEFT files: {args.resume_adapter}")
 
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     if tokenizer.pad_token is None:
@@ -95,16 +98,19 @@ def main(argv: list[str] | None = None) -> int:
     if args.load_in_4bit:
         model = prepare_model_for_kbit_training(model)
 
-    model = get_peft_model(
-        model,
-        LoraConfig(
-            r=args.lora_r,
-            lora_alpha=args.lora_alpha,
-            lora_dropout=args.lora_dropout,
-            target_modules=_target_modules(args.target_modules, model_config),
-            task_type="CAUSAL_LM",
-        ),
-    )
+    if args.resume_adapter:
+        model = PeftModel.from_pretrained(model, args.resume_adapter, is_trainable=True)
+    else:
+        model = get_peft_model(
+            model,
+            LoraConfig(
+                r=args.lora_r,
+                lora_alpha=args.lora_alpha,
+                lora_dropout=args.lora_dropout,
+                target_modules=_target_modules(args.target_modules, model_config),
+                task_type="CAUSAL_LM",
+            ),
+        )
     dataset = load_dataset("json", data_files=str(dataset_path), split="train")
 
     def tokenize(example):
@@ -163,6 +169,15 @@ def _reject_gguf_model(model: str) -> None:
                 "This model directory contains GGUF files only. Use google/gemma-4-e4b-it "
                 "or download the trainable safetensors weights."
             )
+
+
+def adapter_ready(path: str | Path) -> bool:
+    adapter = Path(path)
+    return (
+        adapter.is_dir()
+        and (adapter / "adapter_config.json").is_file()
+        and (adapter / "adapter_model.safetensors").is_file()
+    )
 
 
 def _target_modules(value: str, model_config: Any | None = None) -> list[str] | str:

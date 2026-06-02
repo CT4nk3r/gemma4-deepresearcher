@@ -47,6 +47,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--venv-python", default=".venv-rocm\\Scripts\\python.exe")
     parser.add_argument("--runs-dir", default="runs")
     parser.add_argument("--latest-adapter-dir", default="runs\\gemma4-e4b-deepresearch-lora-latest")
+    parser.add_argument(
+        "--no-cumulative-adapter",
+        dest="cumulative_adapter",
+        action="store_false",
+        help="Train each relay cycle from a fresh LoRA instead of continuing the latest adapter.",
+    )
     parser.add_argument("--train-steps", type=int, default=60)
     parser.add_argument("--train-max-length", type=int, default=512)
     parser.add_argument("--train-batch-size", type=int, default=1)
@@ -189,6 +195,7 @@ def teach(args: argparse.Namespace, deadline: datetime, cycle: int, next_target:
 def train(args: argparse.Namespace, deadline: datetime, cycle: int) -> None:
     unload_teacher(args)
     clean_examples = clean_count(args.clean_output)
+    resume_adapter = latest_adapter_for_resume(args)
     base_run_name = (
         f"gemma4-e4b-deepresearch-lora-relay-"
         f"{cycle:03d}-{clean_examples}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
@@ -202,11 +209,12 @@ def train(args: argparse.Namespace, deadline: datetime, cycle: int) -> None:
             phase="training" if attempt == 1 else "training_retry",
             cycle=cycle,
             adapter_output=output_dir,
+            resume_adapter=resume_adapter,
             deadline=deadline,
             error=str(last_error) if last_error else None,
         )
         try:
-            train_once(args, deadline, output_dir)
+            train_once(args, deadline, output_dir, resume_adapter=resume_adapter)
         except RuntimeError as exc:
             last_error = exc
             log(args, f"Training attempt {attempt}/{attempts} failed: {exc}")
@@ -221,51 +229,85 @@ def train(args: argparse.Namespace, deadline: datetime, cycle: int) -> None:
         shutil.rmtree(latest, ignore_errors=True)
         shutil.copytree(output_dir, latest)
         prune_checkpoints(latest)
-        write_status(args, phase="trained", cycle=cycle, adapter_output=output_dir, deadline=deadline)
+        write_status(
+            args,
+            phase="trained",
+            cycle=cycle,
+            adapter_output=output_dir,
+            resume_adapter=resume_adapter,
+            deadline=deadline,
+        )
         return
 
 
-def train_once(args: argparse.Namespace, deadline: datetime, output_dir: str) -> None:
+def train_once(
+    args: argparse.Namespace,
+    deadline: datetime,
+    output_dir: str,
+    *,
+    resume_adapter: str | None = None,
+) -> None:
     env = dict(os.environ)
     env.setdefault("TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL", "1")
+    command = [
+        args.venv_python,
+        "training\\train_lora.py",
+        "--model",
+        args.base_model,
+        "--dataset",
+        args.clean_output,
+        "--output-dir",
+        output_dir,
+        "--max-steps",
+        str(args.train_steps),
+        "--max-length",
+        str(args.train_max_length),
+        "--batch-size",
+        str(args.train_batch_size),
+        "--gradient-accumulation-steps",
+        str(args.train_grad_accum),
+        "--learning-rate",
+        str(args.learning_rate),
+        "--lora-r",
+        str(args.lora_r),
+        "--lora-alpha",
+        str(args.lora_alpha),
+        "--lora-dropout",
+        str(args.lora_dropout),
+        "--bf16",
+        "--gradient-checkpointing",
+        "--logging-steps",
+        "5",
+        "--save-steps",
+        "0",
+        "--warmup-steps",
+        "0",
+    ]
+    if resume_adapter:
+        command.extend(["--resume-adapter", resume_adapter])
     run_command(
         args,
-        [
-            args.venv_python,
-            "training\\train_lora.py",
-            "--model",
-            args.base_model,
-            "--dataset",
-            args.clean_output,
-            "--output-dir",
-            output_dir,
-            "--max-steps",
-            str(args.train_steps),
-            "--max-length",
-            str(args.train_max_length),
-            "--batch-size",
-            str(args.train_batch_size),
-            "--gradient-accumulation-steps",
-            str(args.train_grad_accum),
-            "--learning-rate",
-            str(args.learning_rate),
-            "--lora-r",
-            str(args.lora_r),
-            "--lora-alpha",
-            str(args.lora_alpha),
-            "--lora-dropout",
-            str(args.lora_dropout),
-            "--bf16",
-            "--gradient-checkpointing",
-            "--logging-steps",
-            "5",
-            "--save-steps",
-            "0",
-            "--warmup-steps",
-            "0",
-        ],
+        command,
         deadline,
         env=env,
+    )
+
+
+def latest_adapter_for_resume(args: argparse.Namespace) -> str | None:
+    if not getattr(args, "cumulative_adapter", True):
+        return None
+    latest = Path(args.latest_adapter_dir)
+    if adapter_ready(latest):
+        return str(latest)
+    return None
+
+
+def adapter_ready(path: str | Path) -> bool:
+    adapter = Path(path)
+    return (
+        adapter.is_dir()
+        and (adapter / "adapter_config.json").is_file()
+        and (adapter / "adapter_model.safetensors").is_file()
     )
 
 
@@ -342,6 +384,7 @@ def write_status(
     deadline: datetime | None = None,
     next_target: int | None = None,
     adapter_output: str | None = None,
+    resume_adapter: str | None = None,
     error: str | None = None,
 ) -> None:
     payload: dict[str, Any] = {
@@ -354,6 +397,7 @@ def write_status(
         "teacher_target": args.teacher_target,
         "next_target": next_target,
         "adapter_output": adapter_output,
+        "resume_adapter": resume_adapter,
         "latest_adapter_dir": args.latest_adapter_dir,
         "pause_file_exists": paused(args),
         "error": error,

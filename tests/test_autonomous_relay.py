@@ -5,7 +5,15 @@ from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
-from training.autonomous_relay import jsonl_count, paused, prune_checkpoints, run_attempt_name, train
+from training.autonomous_relay import (
+    adapter_ready,
+    jsonl_count,
+    latest_adapter_for_resume,
+    paused,
+    prune_checkpoints,
+    run_attempt_name,
+    train,
+)
 
 
 class Args:
@@ -44,11 +52,39 @@ class AutonomousRelayTests(unittest.TestCase):
             self.assertFalse(checkpoint.exists())
             self.assertTrue(adapter.exists())
 
+    def test_latest_adapter_for_resume_requires_peft_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            latest = Path(tmp) / "latest"
+            args = SimpleNamespace(cumulative_adapter=True, latest_adapter_dir=str(latest))
+
+            self.assertFalse(adapter_ready(latest))
+            self.assertIsNone(latest_adapter_for_resume(args))
+
+            latest.mkdir()
+            (latest / "adapter_config.json").write_text("{}", encoding="utf-8")
+            self.assertFalse(adapter_ready(latest))
+            self.assertIsNone(latest_adapter_for_resume(args))
+
+            (latest / "adapter_model.safetensors").write_text("adapter", encoding="utf-8")
+            self.assertTrue(adapter_ready(latest))
+            self.assertEqual(latest_adapter_for_resume(args), str(latest))
+
+    def test_latest_adapter_for_resume_can_be_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            latest = Path(tmp) / "latest"
+            latest.mkdir()
+            (latest / "adapter_config.json").write_text("{}", encoding="utf-8")
+            (latest / "adapter_model.safetensors").write_text("adapter", encoding="utf-8")
+            args = SimpleNamespace(cumulative_adapter=False, latest_adapter_dir=str(latest))
+
+            self.assertIsNone(latest_adapter_for_resume(args))
+
     def test_train_retries_transient_training_failure(self):
         with tempfile.TemporaryDirectory() as tmp:
             args = SimpleNamespace(
                 base_model="google/gemma-4-e4b-it",
                 clean_output=str(Path(tmp) / "clean.jsonl"),
+                cumulative_adapter=True,
                 latest_adapter_dir=str(Path(tmp) / "latest"),
                 learning_rate=5e-5,
                 log_output=str(Path(tmp) / "relay.log"),
@@ -70,10 +106,14 @@ class AutonomousRelayTests(unittest.TestCase):
                 venv_python="python",
             )
             Path(args.clean_output).write_text("{}\n", encoding="utf-8")
+            latest = Path(args.latest_adapter_dir)
+            latest.mkdir()
+            (latest / "adapter_config.json").write_text("{}", encoding="utf-8")
+            (latest / "adapter_model.safetensors").write_text("adapter", encoding="utf-8")
             calls = []
 
-            def fake_train_once(_args, _deadline, output_dir):
-                calls.append(output_dir)
+            def fake_train_once(_args, _deadline, output_dir, *, resume_adapter=None):
+                calls.append((output_dir, resume_adapter))
                 if len(calls) == 1:
                     raise RuntimeError("transient native crash")
 
@@ -86,8 +126,10 @@ class AutonomousRelayTests(unittest.TestCase):
                 train(args, datetime.now(timezone.utc) + timedelta(minutes=5), cycle=6)
 
             self.assertEqual(len(calls), 2)
-            self.assertTrue(calls[0].endswith("-try01"))
-            self.assertTrue(calls[1].endswith("-try02"))
+            self.assertTrue(calls[0][0].endswith("-try01"))
+            self.assertTrue(calls[1][0].endswith("-try02"))
+            self.assertEqual(calls[0][1], str(latest))
+            self.assertEqual(calls[1][1], str(latest))
 
 
 if __name__ == "__main__":
