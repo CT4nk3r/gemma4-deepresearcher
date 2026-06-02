@@ -35,7 +35,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--fp16", action="store_true", help="Train with float16")
     parser.add_argument("--gradient-checkpointing", action="store_true")
     parser.add_argument("--logging-steps", type=int, default=10)
-    parser.add_argument("--save-steps", type=int, default=100)
+    parser.add_argument("--save-steps", type=int, default=100, help="Checkpoint interval; use 0 to save only the final adapter")
     parser.add_argument("--warmup-steps", type=int, default=10)
     parser.add_argument("--train-on-input", action="store_true", help="Do not mask prompt tokens")
     args = parser.parse_args(argv)
@@ -128,6 +128,8 @@ def main(argv: list[str] | None = None) -> int:
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         logging_steps=args.logging_steps,
         save_steps=args.save_steps,
+        save_strategy="no" if args.save_steps <= 0 else "steps",
+        save_total_limit=1,
         warmup_steps=args.warmup_steps,
         bf16=args.bf16,
         fp16=args.fp16,

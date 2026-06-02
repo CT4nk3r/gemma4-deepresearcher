@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
-from training.autonomous_relay import jsonl_count, paused, run_attempt_name, train
+from training.autonomous_relay import jsonl_count, paused, prune_checkpoints, run_attempt_name, train
 
 
 class Args:
@@ -29,6 +29,20 @@ class AutonomousRelayTests(unittest.TestCase):
     def test_run_attempt_name_adds_suffix_when_retries_enabled(self):
         self.assertEqual(run_attempt_name("run", 2, 3), "run-try02")
         self.assertEqual(run_attempt_name("run", 1, 1), "run")
+
+    def test_prune_checkpoints_keeps_final_adapter_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            checkpoint = run_dir / "checkpoint-10"
+            checkpoint.mkdir(parents=True)
+            (checkpoint / "optimizer.pt").write_text("state", encoding="utf-8")
+            adapter = run_dir / "adapter_model.safetensors"
+            adapter.write_text("adapter", encoding="utf-8")
+
+            prune_checkpoints(run_dir)
+
+            self.assertFalse(checkpoint.exists())
+            self.assertTrue(adapter.exists())
 
     def test_train_retries_transient_training_failure(self):
         with tempfile.TemporaryDirectory() as tmp:

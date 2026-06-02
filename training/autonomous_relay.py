@@ -216,9 +216,11 @@ def train(args: argparse.Namespace, deadline: datetime, cycle: int) -> None:
             sleep_with_pause(args, args.train_retry_sleep)
             continue
 
+        prune_checkpoints(output_dir)
         latest = Path(args.latest_adapter_dir)
         shutil.rmtree(latest, ignore_errors=True)
         shutil.copytree(output_dir, latest)
+        prune_checkpoints(latest)
         write_status(args, phase="trained", cycle=cycle, adapter_output=output_dir, deadline=deadline)
         return
 
@@ -258,13 +260,25 @@ def train_once(args: argparse.Namespace, deadline: datetime, output_dir: str) ->
             "--logging-steps",
             "5",
             "--save-steps",
-            "10",
+            "0",
             "--warmup-steps",
             "0",
         ],
         deadline,
         env=env,
     )
+
+
+def prune_checkpoints(path: str | Path) -> None:
+    root = Path(path).resolve()
+    if not root.exists():
+        return
+    for checkpoint in root.rglob("checkpoint-*"):
+        if checkpoint.is_dir():
+            resolved = checkpoint.resolve()
+            if root not in resolved.parents:
+                raise RuntimeError(f"Refusing to prune checkpoint outside run directory: {resolved}")
+            shutil.rmtree(resolved, ignore_errors=True)
 
 
 def run_attempt_name(base_run_name: str, attempt: int, attempts: int) -> str:
