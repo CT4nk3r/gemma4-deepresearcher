@@ -102,6 +102,16 @@ powershell -ExecutionPolicy Bypass -File scripts\stop-autonomous-relay.ps1
 
 The latest successful adapter is copied to `runs\gemma4-e4b-deepresearch-lora-latest`. Individual pass outputs remain under `runs\gemma4-e4b-deepresearch-lora-relay-*`.
 
+By default, `scripts\start-autonomous-relay.ps1` now starts the relay in closed-loop mode:
+
+1. Tongyi distills new learning material.
+2. Gemma4 continues training from `runs\gemma4-e4b-deepresearch-lora-latest`.
+3. The relay evaluates base Gemma4 vs. the latest adapter.
+4. Eval regressions are written to `.gemma-research\closed_loop_feedback.json` and `.gemma-research\closed_loop_focus.txt`.
+5. The next teacher pass uses that feedback to create targeted repair examples, especially for `hallucination_proxy`.
+
+Use `-DisableClosedLoop` when you need a training-only relay.
+
 ## LoRA training
 
 ```powershell
@@ -124,3 +134,13 @@ python training\merge_adapter.py --model <base-gemma-model> --adapter adapters\g
 - gap identification;
 - refusal to over-answer when evidence is weak;
 - synthesis from source-backed notes.
+
+## Next training priority
+
+The next relay pass should explicitly target `hallucination_proxy` as the main regression to fix.
+That means:
+
+- favoring cited claims over uncited elaboration;
+- penalizing answers that add factual details without support;
+- keeping the uncertainty behavior we gained, but making sure it does not come with extra unsupported claims;
+- reviewing eval failures where the adapter was more verbose or more confident than the base model without better evidence.

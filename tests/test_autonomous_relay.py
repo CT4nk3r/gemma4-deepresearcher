@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -7,12 +8,14 @@ from unittest.mock import patch
 
 from training.autonomous_relay import (
     adapter_ready,
+    build_feedback,
     jsonl_count,
     latest_adapter_for_resume,
     paused,
     prune_checkpoints,
     run_attempt_name,
     train,
+    write_adaptive_seed_examples,
 )
 
 
@@ -130,6 +133,59 @@ class AutonomousRelayTests(unittest.TestCase):
             self.assertTrue(calls[1][0].endswith("-try02"))
             self.assertEqual(calls[0][1], str(latest))
             self.assertEqual(calls[1][1], str(latest))
+
+    def test_build_feedback_prioritizes_hallucination_proxy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            eval_path = Path(tmp) / "eval.json"
+            eval_path.write_text(
+                json.dumps(
+                    {
+                        "aggregate": {
+                            "delta": {
+                                "overall_score": -0.02,
+                                "citation_rate": 0.01,
+                                "hallucination_proxy": 0.29,
+                                "uncertainty_score": 0.2,
+                                "format_score": 0.07,
+                            }
+                        },
+                        "items": [
+                            {
+                                "index": 1,
+                                "question": "What evidence is needed?",
+                                "delta": {"overall_score": -0.1, "hallucination_proxy": 0.5},
+                                "adapter": {"response": "Direct answer: unsupported detail."},
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            feedback = build_feedback(eval_path, seed_count=1)
+
+            self.assertIn("Reduce hallucination_proxy", feedback["focus_text"])
+            self.assertEqual(len(feedback["worst_items"]), 1)
+
+    def test_write_adaptive_seed_examples_uses_eval_failures(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "seed.jsonl"
+            feedback = {
+                "priorities": ["Reduce hallucination_proxy"],
+                "worst_items": [
+                    {
+                        "index": 7,
+                        "question": "Assess a claim.",
+                        "adapter": {"response": "Direct answer: The claim is true."},
+                    }
+                ],
+            }
+
+            write_adaptive_seed_examples(feedback, output)
+
+            row = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(row["metadata"]["repair_target"], "hallucination_proxy")
+            self.assertIn("[S1]", row["messages"][1]["content"])
 
 
 if __name__ == "__main__":

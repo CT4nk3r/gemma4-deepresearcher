@@ -5,6 +5,9 @@ param(
     [int]$TeacherChunkSize = 25,
     [int]$TrainSteps = 60,
     [int]$TrainMaxLength = 512,
+    [int]$EvalMaxNewTokens = 384,
+    [int]$EvalLimit = 0,
+    [switch]$DisableClosedLoop,
     [string]$VenvPython = ".venv-rocm\Scripts\python.exe"
 )
 
@@ -58,6 +61,13 @@ $Command = @(
     "--pause-file '$PauseFile'",
     "--distillation-pause-file '$DistillationPauseFile'"
 ) -join " "
+
+if (-not $DisableClosedLoop) {
+    $Command += " --closed-loop --eval-max-new-tokens $EvalMaxNewTokens"
+    if ($EvalLimit -gt 0) {
+        $Command += " --eval-limit $EvalLimit"
+    }
+}
 
 $Process = Start-Process -FilePath "powershell" `
     -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "$Command *> '$WrapperLogFile'") `

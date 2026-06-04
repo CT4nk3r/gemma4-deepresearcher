@@ -31,6 +31,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--raw-output", default="data\\teacher_distilled_starter_sft.jsonl")
     parser.add_argument("--clean-output", default="data\\teacher_distilled_clean_sft.jsonl")
     parser.add_argument("--stats-output", default="data\\teacher_distilled_clean_sft.stats.json")
+    parser.add_argument("--adaptive-raw-output", default="data\\closed_loop_teacher_distilled_sft.jsonl")
+    parser.add_argument("--adaptive-seed-output", default="data\\closed_loop_seed_sft.jsonl")
+    parser.add_argument("--feedback-output", default=".gemma-research\\closed_loop_feedback.json")
+    parser.add_argument("--focus-output", default=".gemma-research\\closed_loop_focus.txt")
     parser.add_argument("--status-output", default=".gemma-research\\autonomous_relay_status.json")
     parser.add_argument("--log-output", default=".gemma-research\\autonomous_relay.log")
     parser.add_argument("--pause-file", default=".gemma-research\\autonomous_relay.pause")
@@ -65,6 +69,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--lora-dropout", type=float, default=0.05)
     parser.add_argument("--min-clean-examples", type=int, default=50)
     parser.add_argument("--wait-existing-training", action="store_true")
+    parser.add_argument("--closed-loop", action="store_true", help="Run teach -> train -> eval -> feedback cycles.")
+    parser.add_argument("--eval-set", default="data\\eval_set.jsonl")
+    parser.add_argument("--eval-output-dir", default="eval\\results")
+    parser.add_argument("--eval-max-new-tokens", type=int, default=384)
+    parser.add_argument("--eval-limit", type=int, help="Evaluate only the first N eval examples each cycle.")
+    parser.add_argument(
+        "--closed-loop-seed-count",
+        type=int,
+        default=8,
+        help="Number of targeted feedback seed examples to prepare after each eval.",
+    )
     args = parser.parse_args(argv)
 
     if args.hours <= 0:
@@ -79,6 +94,8 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("--train-retries must not be negative")
     if args.train_retry_sleep < 0:
         raise SystemExit("--train-retry-sleep must not be negative")
+    if args.closed_loop_seed_count < 1:
+        raise SystemExit("--closed-loop-seed-count must be at least 1")
 
     state_paths(args)
     deadline = datetime.now(timezone.utc) + timedelta(hours=args.hours)
@@ -94,7 +111,18 @@ def main(argv: list[str] | None = None) -> int:
         clean_and_validate(args, deadline, cycle)
 
         raw_examples = jsonl_count(args.raw_output)
-        if raw_examples < args.teacher_target:
+        if args.closed_loop and adaptive_seed_ready(args):
+            adaptive_current = jsonl_count(args.adaptive_raw_output)
+            next_target = adaptive_current + args.teacher_cycle_size
+            teach(args, deadline, cycle, next_target, adaptive=True)
+            clean_and_validate(args, deadline, cycle)
+        elif args.closed_loop and raw_examples < args.teacher_target:
+            next_target = min(args.teacher_target, raw_examples + args.teacher_cycle_size)
+            teach(args, deadline, cycle, next_target)
+            clean_and_validate(args, deadline, cycle)
+        elif args.closed_loop:
+            write_status(args, phase="closed_loop_waiting_for_feedback", cycle=cycle, deadline=deadline)
+        elif raw_examples < args.teacher_target:
             next_target = min(args.teacher_target, raw_examples + args.teacher_cycle_size)
             teach(args, deadline, cycle, next_target)
             clean_and_validate(args, deadline, cycle)
@@ -102,7 +130,9 @@ def main(argv: list[str] | None = None) -> int:
             write_status(args, phase="teacher_target_reached", cycle=cycle, deadline=deadline)
 
         if clean_count(args.clean_output) >= args.min_clean_examples:
-            train(args, deadline, cycle)
+            trained_output = train(args, deadline, cycle)
+            if args.closed_loop and trained_output and not paused(args):
+                evaluate_and_update_feedback(args, deadline, cycle, trained_output)
         else:
             write_status(args, phase="waiting_for_data", cycle=cycle, deadline=deadline)
             sleep_with_pause(args, 60)
@@ -114,7 +144,14 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def state_paths(args: argparse.Namespace) -> None:
-    for path in [args.status_output, args.log_output]:
+    for path in [
+        args.status_output,
+        args.log_output,
+        args.feedback_output,
+        args.focus_output,
+        args.adaptive_raw_output,
+        args.adaptive_seed_output,
+    ]:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
 
 
@@ -127,7 +164,8 @@ def wait_for_existing_training(args: argparse.Namespace, deadline: datetime) -> 
 
 def clean_and_validate(args: argparse.Namespace, deadline: datetime, cycle: int) -> None:
     write_status(args, phase="cleaning", cycle=cycle, deadline=deadline)
-    result = clean_main(["--input", args.raw_output, "--output", args.clean_output])
+    clean_input = combined_raw_input(args)
+    result = clean_main(["--input", clean_input, "--output", args.clean_output])
     if result != 0:
         raise RuntimeError(f"clean_sft_dataset exited with code {result}")
     stats = validate_dataset(args.clean_output)
@@ -138,7 +176,24 @@ def clean_and_validate(args: argparse.Namespace, deadline: datetime, cycle: int)
     write_status(args, phase="clean", cycle=cycle, deadline=deadline)
 
 
-def teach(args: argparse.Namespace, deadline: datetime, cycle: int, next_target: int) -> None:
+def combined_raw_input(args: argparse.Namespace) -> str:
+    adaptive = Path(args.adaptive_raw_output)
+    if not adaptive.exists() or jsonl_count(adaptive) == 0:
+        return args.raw_output
+
+    combined = Path(args.raw_output).parent / "teacher_distilled_combined_sft.jsonl"
+    with combined.open("w", encoding="utf-8") as handle:
+        for source in [Path(args.raw_output), adaptive]:
+            if not source.exists():
+                continue
+            with source.open("r", encoding="utf-8") as source_handle:
+                for line in source_handle:
+                    if line.strip():
+                        handle.write(line)
+    return str(combined)
+
+
+def teach(args: argparse.Namespace, deadline: datetime, cycle: int, next_target: int, *, adaptive: bool = False) -> None:
     write_status(args, phase="loading_teacher", cycle=cycle, next_target=next_target, deadline=deadline)
     Path(args.distillation_pause_file).unlink(missing_ok=True)
     run_command(args, ["lms", "server", "start"], deadline, allow_failure=True)
@@ -158,16 +213,17 @@ def teach(args: argparse.Namespace, deadline: datetime, cycle: int, next_target:
         ],
         deadline,
     )
+    input_path = args.adaptive_seed_output if adaptive else args.input
+    raw_output = args.adaptive_raw_output if adaptive else args.raw_output
+    resume_skip_count = jsonl_count(raw_output) if adaptive else None
     write_status(args, phase="teaching", cycle=cycle, next_target=next_target, deadline=deadline)
-    run_command(
-        args,
-        [
+    command = [
             sys.executable,
             "training\\supervise_distillation.py",
             "--input",
-            args.input,
+            input_path,
             "--raw-output",
-            args.raw_output,
+            raw_output,
             "--clean-output",
             args.clean_output,
             "--stats-output",
@@ -186,13 +242,16 @@ def teach(args: argparse.Namespace, deadline: datetime, cycle: int, next_target:
             str(args.max_tokens),
             "--pause-file",
             args.distillation_pause_file,
-        ],
-        deadline,
-    )
+    ]
+    if adaptive:
+        command.extend(["--resume-skip-count", str(resume_skip_count)])
+    if Path(args.focus_output).exists():
+        command.extend(["--focus-file", args.focus_output])
+    run_command(args, command, deadline)
     unload_teacher(args)
 
 
-def train(args: argparse.Namespace, deadline: datetime, cycle: int) -> None:
+def train(args: argparse.Namespace, deadline: datetime, cycle: int) -> str | None:
     unload_teacher(args)
     clean_examples = clean_count(args.clean_output)
     resume_adapter = latest_adapter_for_resume(args)
@@ -237,7 +296,8 @@ def train(args: argparse.Namespace, deadline: datetime, cycle: int) -> None:
             resume_adapter=resume_adapter,
             deadline=deadline,
         )
-        return
+        return output_dir
+    return None
 
 
 def train_once(
@@ -293,6 +353,155 @@ def train_once(
     )
 
 
+def evaluate_and_update_feedback(
+    args: argparse.Namespace,
+    deadline: datetime,
+    cycle: int,
+    adapter_output: str,
+) -> None:
+    write_status(
+        args,
+        phase="evaluating",
+        cycle=cycle,
+        adapter_output=adapter_output,
+        deadline=deadline,
+    )
+    before = latest_eval_json(args.eval_output_dir)
+    command = [
+        args.venv_python,
+        "training\\eval_adapter.py",
+        "--adapter",
+        args.latest_adapter_dir,
+        "--base-model",
+        args.base_model,
+        "--eval-set",
+        args.eval_set,
+        "--output-dir",
+        args.eval_output_dir,
+        "--max-new-tokens",
+        str(args.eval_max_new_tokens),
+    ]
+    if args.eval_limit is not None:
+        command.extend(["--limit", str(args.eval_limit)])
+    run_command(args, command, deadline, env=rocm_env())
+
+    result_path = latest_eval_json(args.eval_output_dir)
+    if result_path is None or result_path == before:
+        raise RuntimeError("Evaluation did not write a new result file")
+    feedback = build_feedback(result_path, seed_count=args.closed_loop_seed_count)
+    Path(args.feedback_output).write_text(
+        json.dumps(feedback, indent=2, ensure_ascii=True),
+        encoding="utf-8",
+    )
+    Path(args.focus_output).write_text(feedback["focus_text"], encoding="utf-8")
+    Path(args.adaptive_raw_output).unlink(missing_ok=True)
+    write_adaptive_seed_examples(feedback, args.adaptive_seed_output)
+    write_status(
+        args,
+        phase="feedback_ready",
+        cycle=cycle,
+        adapter_output=adapter_output,
+        deadline=deadline,
+    )
+
+
+def latest_eval_json(output_dir: str | Path) -> Path | None:
+    candidates = sorted(Path(output_dir).glob("eval-*.json"), key=lambda path: path.stat().st_mtime)
+    return candidates[-1] if candidates else None
+
+
+def build_feedback(eval_json: str | Path, *, seed_count: int) -> dict[str, Any]:
+    payload = json.loads(Path(eval_json).read_text(encoding="utf-8"))
+    aggregate = payload.get("aggregate", {})
+    delta = aggregate.get("delta", {})
+    items = payload.get("items", [])
+    worst = sorted(
+        (item for item in items if isinstance(item, dict)),
+        key=feedback_sort_key,
+        reverse=True,
+    )[:seed_count]
+
+    priorities = []
+    if float(delta.get("hallucination_proxy", 0.0)) > 0:
+        priorities.append("Reduce hallucination_proxy: remove or qualify uncited factual claims.")
+    if float(delta.get("citation_rate", 0.0)) < 0:
+        priorities.append("Improve citation_rate: every factual claim needs a provided citation.")
+    if float(delta.get("format_score", 0.0)) < 0:
+        priorities.append("Restore format compliance: direct answer, evidence summary, conclusion.")
+    if float(delta.get("uncertainty_score", 0.0)) < 0:
+        priorities.append("Restore uncertainty handling when evidence is missing or weak.")
+    if not priorities:
+        priorities.append("Maintain gains while reducing unsupported factual additions.")
+
+    focus_text = "\n".join(
+        [
+            "Closed-loop eval feedback:",
+            f"- overall_score delta: {delta.get('overall_score', 0.0):+}",
+            f"- citation_rate delta: {delta.get('citation_rate', 0.0):+}",
+            f"- hallucination_proxy delta: {delta.get('hallucination_proxy', 0.0):+} (lower is better)",
+            f"- uncertainty_score delta: {delta.get('uncertainty_score', 0.0):+}",
+            f"- format_score delta: {delta.get('format_score', 0.0):+}",
+            "Priorities:",
+            *[f"- {priority}" for priority in priorities],
+        ]
+    )
+    return {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "eval_result": str(eval_json),
+        "aggregate": aggregate,
+        "priorities": priorities,
+        "focus_text": focus_text,
+        "worst_items": worst,
+    }
+
+
+def feedback_sort_key(item: dict[str, Any]) -> tuple[float, float]:
+    delta = item.get("delta", {})
+    hallucination_regression = float(delta.get("hallucination_proxy", 0.0))
+    overall_drop = -float(delta.get("overall_score", 0.0))
+    return hallucination_regression, overall_drop
+
+
+def write_adaptive_seed_examples(feedback: dict[str, Any], output: str | Path) -> None:
+    output_path = Path(output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8") as handle:
+        for item in feedback.get("worst_items", []):
+            example = adaptive_seed_example(item, feedback.get("priorities", []))
+            handle.write(json.dumps(example, ensure_ascii=True) + "\n")
+
+
+def adaptive_seed_example(item: dict[str, Any], priorities: list[str]) -> dict[str, Any]:
+    question = str(item.get("question", "")).strip()
+    adapter_response = str(((item.get("adapter") or {}).get("response") or "")).strip()
+    user_payload = (
+        f"Question:\n{question}\n\n"
+        "Available source notes:\n"
+        "[S1] The prompt does not provide primary source documents, measurements, or named studies.\n"
+        "[S2] A careful research answer should describe what evidence would be needed and avoid unsupported factual additions.\n"
+        "[S3] Any claim not supported by the provided notes should be removed, qualified, or marked as insufficiently evidenced.\n\n"
+        "Current repair priorities:\n"
+        + "\n".join(f"- {priority}" for priority in priorities)
+    )
+    return {
+        "messages": [
+            {"role": "system", "content": "You are a careful research assistant."},
+            {"role": "user", "content": user_payload},
+            {"role": "assistant", "content": adapter_response},
+        ],
+        "metadata": {
+            "dataset_id": "closed-loop-eval-repair",
+            "source_eval_index": item.get("index"),
+            "repair_target": "hallucination_proxy",
+        },
+    }
+
+
+def adaptive_seed_ready(args: argparse.Namespace) -> bool:
+    seed = Path(args.adaptive_seed_output)
+    return seed.exists() and jsonl_count(seed) > jsonl_count(args.adaptive_raw_output)
+
+
 def latest_adapter_for_resume(args: argparse.Namespace) -> str | None:
     if not getattr(args, "cumulative_adapter", True):
         return None
@@ -309,6 +518,12 @@ def adapter_ready(path: str | Path) -> bool:
         and (adapter / "adapter_config.json").is_file()
         and (adapter / "adapter_model.safetensors").is_file()
     )
+
+
+def rocm_env() -> dict[str, str]:
+    env = dict(os.environ)
+    env.setdefault("TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL", "1")
+    return env
 
 
 def prune_checkpoints(path: str | Path) -> None:
@@ -393,12 +608,15 @@ def write_status(
         "cycle": cycle,
         "deadline": deadline.isoformat() if deadline else None,
         "raw_examples": jsonl_count(args.raw_output),
+        "adaptive_raw_examples": jsonl_count(getattr(args, "adaptive_raw_output", "")),
+        "adaptive_seed_examples": jsonl_count(getattr(args, "adaptive_seed_output", "")),
         "clean_examples": clean_count(args.clean_output),
         "teacher_target": args.teacher_target,
         "next_target": next_target,
         "adapter_output": adapter_output,
         "resume_adapter": resume_adapter,
         "latest_adapter_dir": args.latest_adapter_dir,
+        "feedback_output": getattr(args, "feedback_output", None),
         "pause_file_exists": paused(args),
         "error": error,
     }
@@ -423,8 +641,10 @@ def sleep_with_pause(args: argparse.Namespace, seconds: int) -> None:
 
 
 def jsonl_count(path: str | Path) -> int:
+    if not path:
+        return 0
     candidate = Path(path)
-    return count_jsonl(candidate) if candidate.exists() else 0
+    return count_jsonl(candidate) if candidate.exists() and candidate.is_file() else 0
 
 
 def clean_count(path: str | Path) -> int:

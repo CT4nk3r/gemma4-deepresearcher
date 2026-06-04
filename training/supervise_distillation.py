@@ -38,6 +38,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--sleep", type=float, default=0.1)
     parser.add_argument("--retries", type=int, default=3)
     parser.add_argument("--retry-sleep", type=float, default=10.0)
+    parser.add_argument("--resume-skip-count", type=int)
+    parser.add_argument("--focus-file")
     parser.add_argument("--failure-sleep", type=float, default=60.0)
     parser.add_argument("--max-failures", type=int, default=20)
     parser.add_argument("--max-stalled-chunks", type=int, default=5)
@@ -147,6 +149,10 @@ def run_distillation_chunk(args: argparse.Namespace, next_target: int) -> None:
         "--on-error",
         "skip",
     ]
+    if args.resume_skip_count is not None:
+        distill_args.extend(["--resume-skip-count", str(args.resume_skip_count)])
+    if args.focus_file:
+        distill_args.extend(["--focus-file", args.focus_file])
     if args.dry_run:
         distill_args.append("--dry-run")
     result = distill_main(distill_args)

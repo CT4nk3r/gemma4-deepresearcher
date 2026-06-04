@@ -60,6 +60,15 @@ def main(argv: list[str] | None = None) -> int:
         help="Append to an existing output file and skip already-written input examples",
     )
     parser.add_argument(
+        "--resume-skip-count",
+        type=int,
+        help="Override how many input examples are skipped when --resume is used.",
+    )
+    parser.add_argument(
+        "--focus-file",
+        help="Optional text file with additional distillation priorities for this run.",
+    )
+    parser.add_argument(
         "--on-error",
         choices=["fail", "skip", "keep-original"],
         default="fail",
@@ -71,10 +80,12 @@ def main(argv: list[str] | None = None) -> int:
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     existing_count = count_jsonl(output_path) if args.resume and output_path.exists() else 0
+    skip_count = args.resume_skip_count if args.resume_skip_count is not None else existing_count
+    focus = Path(args.focus_file).read_text(encoding="utf-8").strip() if args.focus_file else ""
 
     examples = read_jsonl(args.input)
-    if existing_count:
-        examples = _skip(examples, existing_count)
+    if skip_count:
+        examples = _skip(examples, skip_count)
     if args.max_examples is not None:
         remaining = max(args.max_examples - existing_count, 0)
         examples = _take(examples, remaining)
@@ -94,6 +105,7 @@ def main(argv: list[str] | None = None) -> int:
                     dry_run=args.dry_run,
                     retries=args.retries,
                     retry_sleep=args.retry_sleep,
+                    focus=focus,
                 )
             except RuntimeError:
                 if args.on_error == "skip":
@@ -124,6 +136,7 @@ def distill_example_with_retries(
     dry_run: bool,
     retries: int,
     retry_sleep: float,
+    focus: str = "",
 ) -> dict[str, Any]:
     attempts = retries + 1
     for attempt in range(1, attempts + 1):
@@ -136,6 +149,7 @@ def distill_example_with_retries(
                 max_tokens=max_tokens,
                 timeout=timeout,
                 dry_run=dry_run,
+                focus=focus,
             )
         except RuntimeError as exc:
             if attempt >= attempts or not is_retryable_error(str(exc)):
@@ -157,13 +171,14 @@ def distill_example(
     max_tokens: int,
     timeout: int,
     dry_run: bool = False,
+    focus: str = "",
 ) -> dict[str, Any]:
     messages = example.get("messages")
     if not isinstance(messages, list) or len(messages) < 3:
         raise ValueError("Input example must contain chat messages")
     user_content = str(messages[1].get("content", ""))
     original_answer = str(messages[-1].get("content", ""))
-    prompt = build_distillation_prompt(user_content, original_answer)
+    prompt = build_distillation_prompt(user_content, original_answer, focus=focus)
     if dry_run:
         rewritten = f"[DRY RUN] {original_answer}"
     else:
@@ -195,7 +210,13 @@ def distill_example(
     return distilled
 
 
-def build_distillation_prompt(user_content: str, original_answer: str) -> str:
+def build_distillation_prompt(user_content: str, original_answer: str, *, focus: str = "") -> str:
+    focus_block = ""
+    if focus.strip():
+        focus_block = (
+            "\nCurrent eval feedback to optimize for:\n"
+            f"{focus.strip()}\n"
+        )
     return (
         "Create the assistant response for this SFT example. Return only the final "
         "assistant message, not analysis, XML, JSON, or markdown fences.\n\n"
@@ -207,7 +228,8 @@ def build_distillation_prompt(user_content: str, original_answer: str) -> str:
         "- Separate evidence from interpretation.\n"
         "- If the evidence does not support the answer, say what is missing.\n"
         "- Do not invent URLs, citations, sources, numbers, dates, names, quotes, or facts.\n"
-        "- Do not mention teacher models, distillation, training, or hidden reasoning.\n\n"
+        "- Do not mention teacher models, distillation, training, or hidden reasoning.\n"
+        f"{focus_block}\n"
         f"User payload:\n{user_content}\n\n"
         f"Original answer to improve:\n{original_answer}\n"
     )
